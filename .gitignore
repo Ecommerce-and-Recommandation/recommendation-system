@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large data files (tracked separately or downloaded)
+data/transactions_clean.csv
+
+# Model artifacts (large binary files)
+models/*.joblib
+
+# Distribution
+dist/
+build/
+*.egg-info/

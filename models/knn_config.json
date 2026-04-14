@@ -1,0 +1,16 @@
+{
+  "n_neighbors": 10,
+  "metric": "cosine",
+  "tfidf_max_features": 500,
+  "numeric_features": [
+    "avg_price",
+    "purchase_count",
+    "total_qty_sold",
+    "avg_qty_per_order",
+    "num_customers"
+  ],
+  "numeric_weight": 0.3,
+  "total_products": 4499,
+  "hit_rate": 0.7220629693681742,
+  "avg_customer_hit_rate": 0.6112658042754879
+}

@@ -1,0 +1,32 @@
+{
+  "n_clusters": 4,
+  "rfm_features": [
+    "recency",
+    "frequency",
+    "monetary",
+    "avg_order_value",
+    "total_unique_products",
+    "avg_days_between_orders",
+    "days_since_first_purchase"
+  ],
+  "n_pca_components": 3,
+  "pca_explained_variance": [
+    0.35292722995929465,
+    0.18844177298800827,
+    0.17018759641154788
+  ],
+  "silhouette_score": 0.3739623499462401,
+  "davies_bouldin_score": 0.812041246751252,
+  "segment_names": {
+    "3": "🏆 VIP / Champions",
+    "2": "🌟 Potential / Tiềm năng",
+    "1": "👋 Casual / Vãng lai",
+    "0": "💤 Hibernating / Ngủ đông"
+  },
+  "segment_counts": {
+    "2": 2237,
+    "1": 1702,
+    "0": 1069,
+    "3": 15
+  }
+}

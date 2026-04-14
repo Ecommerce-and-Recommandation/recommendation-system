@@ -1,0 +1,46 @@
+{
+  "model_type": "RandomForestClassifier",
+  "version": "v2_with_segments",
+  "best_params": {
+    "class_weight": "balanced",
+    "max_depth": null,
+    "min_samples_leaf": 4,
+    "min_samples_split": 10,
+    "n_estimators": 100
+  },
+  "feature_columns": [
+    "recency",
+    "frequency",
+    "monetary",
+    "avg_order_value",
+    "avg_items_per_order",
+    "total_unique_products",
+    "avg_days_between_orders",
+    "cancellation_rate",
+    "days_since_first_purchase",
+    "is_weekend_shopper",
+    "favorite_hour",
+    "country_encoded",
+    "avg_unit_price",
+    "segment_id"
+  ],
+  "target": "will_purchase",
+  "metrics": {
+    "accuracy": 0.708457711442786,
+    "precision": 0.7270788912579957,
+    "recall": 0.6739130434782609,
+    "f1_score": 0.6994871794871795,
+    "roc_auc": 0.7891157809690528
+  },
+  "metrics_without_segment": {
+    "accuracy": 0.7164179104477612,
+    "f1_score": 0.7021943573667712,
+    "roc_auc": 0.7930525081784121
+  },
+  "cv_f1_mean": 0.7305831573023598,
+  "cv_f1_std": 0.01180609910549833,
+  "train_samples": 4018,
+  "test_samples": 1005,
+  "n_features": 14,
+  "segment_id_importance": 0.06002467592483275
+}
