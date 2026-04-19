@@ -1,7 +1,7 @@
 """Behavior analysis engine – converts raw events into ML features."""
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -94,29 +94,150 @@ async def compute_rfm_from_behavior(user_id: int, db: AsyncSession) -> dict:
     }
 
 
-async def get_most_interacted_product(user_id: int, db: AsyncSession) -> str | None:
-    """Find the product the user spent most time viewing or added to cart most."""
-    add_to_cart_bonus = case(
-        (BehaviorEvent.event_type == "add_to_cart", 30),
-        else_=0,
-    )
-    score_expr = func.sum(
-        func.coalesce(BehaviorEvent.duration_seconds, 0) + add_to_cart_bonus
-    )
+async def get_recommendation_sources(
+    user_id: int,
+    db: AsyncSession,
+    current_product_id: int | None = None,
+) -> list[dict]:
+    """Collect multiple recommendation sources with priority weights.
 
-    result = await db.execute(
-        select(BehaviorEvent.product_id, score_expr.label("score"))
-        .where(BehaviorEvent.user_id == user_id, BehaviorEvent.product_id.isnot(None))
+    Returns a ranked list of {"stock_code": str, "weight": float, "source": str}
+    gathered from:
+      1. Currently viewed product (highest priority)
+      2. Recently viewed products (last 30 min, recency-weighted)
+      3. All-time top viewed products (duration-weighted)
+      4. Top 5 most-recent cart items
+      5. Search history → matched products
+    """
+    sources: list[dict] = []
+    seen_codes: set[str] = set()
+
+    # ── 1. Currently viewed product ──────────────────────
+    if current_product_id:
+        product = await db.get(Product, current_product_id)
+        if product and product.stock_code not in seen_codes:
+            sources.append({
+                "stock_code": product.stock_code,
+                "weight": 1.0,
+                "source": "current_view",
+            })
+            seen_codes.add(product.stock_code)
+
+    # ── 2. Recently viewed products (last 30 min) ────────
+    # Recency matters: newest views first, regardless of total duration
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+    recent_result = await db.execute(
+        select(
+            BehaviorEvent.product_id,
+            func.max(BehaviorEvent.created_at).label("last_seen"),
+            func.sum(BehaviorEvent.duration_seconds).label("total_duration"),
+        )
+        .where(
+            BehaviorEvent.user_id == user_id,
+            BehaviorEvent.event_type == "view",
+            BehaviorEvent.product_id.isnot(None),
+            BehaviorEvent.duration_seconds > 5,
+            BehaviorEvent.created_at >= recent_cutoff,
+        )
         .group_by(BehaviorEvent.product_id)
-        .order_by(score_expr.desc())
-        .limit(1)
+        .order_by(func.max(BehaviorEvent.created_at).desc())
+        .limit(8)
     )
-    row = result.first()
-    if row is None:
-        return None
+    for row in recent_result.all():
+        product = await db.get(Product, row[0])
+        if product and product.stock_code not in seen_codes:
+            sources.append({
+                "stock_code": product.stock_code,
+                "weight": 1.0,  # Max priority for recent activity
+                "source": "recent_view",
+            })
+            seen_codes.add(product.stock_code)
 
-    product = await db.get(Product, row[0])
-    return product.stock_code if product else None
+    # ── 3. All-time top viewed products (by duration) ────
+    view_result = await db.execute(
+        select(
+            BehaviorEvent.product_id,
+            func.sum(BehaviorEvent.duration_seconds).label("total_duration"),
+        )
+        .where(
+            BehaviorEvent.user_id == user_id,
+            BehaviorEvent.event_type == "view",
+            BehaviorEvent.product_id.isnot(None),
+            BehaviorEvent.duration_seconds > 5,
+        )
+        .group_by(BehaviorEvent.product_id)
+        .order_by(func.sum(BehaviorEvent.duration_seconds).desc())
+        .limit(8)
+    )
+    for row in view_result.all():
+        product = await db.get(Product, row[0])
+        if product and product.stock_code not in seen_codes:
+            duration = float(row[1])
+            # Lowered weight for old accumulated duration to prevent stagnation
+            weight = min(0.4, 0.1 + (duration / 500))
+            sources.append({
+                "stock_code": product.stock_code,
+                "weight": weight,
+                "source": "viewed",
+            })
+            seen_codes.add(product.stock_code)
+
+    # ── 3. Top 5 most-recent cart items ──────────────────
+    cart_result = await db.execute(
+        select(CartItem)
+        .where(CartItem.user_id == user_id)
+        .order_by(CartItem.added_at.desc())
+        .limit(5)
+    )
+    for ci in cart_result.scalars().all():
+        product = await db.get(Product, ci.product_id)
+        if product and product.stock_code not in seen_codes:
+            sources.append({
+                "stock_code": product.stock_code,
+                "weight": 0.7,
+                "source": "cart",
+            })
+            seen_codes.add(product.stock_code)
+
+    # ── 4. Search history → match products ───────────────
+    search_result = await db.execute(
+        select(BehaviorEvent.metadata_json)
+        .where(
+            BehaviorEvent.user_id == user_id,
+            BehaviorEvent.event_type == "search",
+        )
+        .order_by(BehaviorEvent.created_at.desc())
+        .limit(10)
+    )
+    search_queries: list[str] = []
+    for row in search_result.all():
+        meta = row[0]
+        if meta and isinstance(meta, dict) and "query" in meta:
+            search_queries.append(str(meta["query"]))
+
+    if search_queries:
+        # Match unique search terms to products
+        for query in search_queries[:5]:
+            pattern = f"%{query}%"
+            match_result = await db.execute(
+                select(Product)
+                .where(
+                    Product.in_stock.is_(True),
+                    Product.name.ilike(pattern) | Product.description.ilike(pattern),
+                )
+                .order_by(Product.purchase_count.desc())
+                .limit(2)
+            )
+            for p in match_result.scalars().all():
+                if p.stock_code not in seen_codes:
+                    sources.append({
+                        "stock_code": p.stock_code,
+                        "weight": 0.4,
+                        "source": "search",
+                    })
+                    seen_codes.add(p.stock_code)
+
+    return sources
 
 
 def _default_features() -> dict:
@@ -134,3 +255,4 @@ def _default_features() -> dict:
         "favorite_hour": 12,
         "country": "United Kingdom",
     }
+

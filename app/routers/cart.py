@@ -30,6 +30,7 @@ class CartItemOut(BaseModel):
     product_price: float
     product_image: str
     stock_code: str
+    added_at: str
 
 
 class CartResponse(BaseModel):
@@ -58,6 +59,7 @@ async def get_cart(user: User = Depends(get_current_user), db: AsyncSession = De
             "product_price": p.price,
             "product_image": p.image_url,
             "stock_code": p.stock_code,
+            "added_at": item.added_at.isoformat() if item.added_at else "",
         })
     return {"items": out, "total": round(total, 2), "item_count": len(out)}
 
@@ -96,6 +98,7 @@ async def add_to_cart(
         "product_price": product.price,
         "product_image": product.image_url,
         "stock_code": product.stock_code,
+        "added_at": item.added_at.isoformat() if hasattr(item, "added_at") and item.added_at else "",
     }
 
 

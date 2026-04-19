@@ -34,3 +34,5 @@ models/*.joblib
 dist/
 build/
 *.egg-info/
+
+debug_*.py

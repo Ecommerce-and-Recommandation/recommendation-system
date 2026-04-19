@@ -1,6 +1,6 @@
 """Behavior tracking + ML-powered recommendations router."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.db_models import BehaviorEvent, Product, User
 from app.services.auth import get_current_user
-from app.services.behavior_engine import compute_rfm_from_behavior, get_most_interacted_product
+from app.services.behavior_engine import compute_rfm_from_behavior, get_recommendation_sources
 from app.services.predictor import predict_purchase, recommend_products
 from app.schemas.models import CustomerFeatures
 
@@ -35,10 +35,12 @@ async def track_events(
     """Batch-save behavior events from the frontend tracker."""
     saved = 0
     for evt in body.events:
+        # Sanitize: product_id=0 or negative → NULL (no FK violation)
+        pid = evt.product_id if evt.product_id and evt.product_id > 0 else None
         db.add(BehaviorEvent(
             user_id=user.id,
             event_type=evt.event_type,
-            product_id=evt.product_id,
+            product_id=pid,
             duration_seconds=evt.duration_seconds,
             metadata_json=evt.metadata,
         ))
@@ -49,13 +51,24 @@ async def track_events(
 
 @router.get("/behavior/recommendations")
 async def get_recommendations(
+    current_product_id: int | None = Query(None, description="Product currently being viewed"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """ML-powered: find most-interacted product → KNN → similar products."""
-    stock_code = await get_most_interacted_product(user.id, db)
-    if stock_code is None:
-        # Fallback: return popular products
+    """Multi-source ML recommendations.
+
+    Gathers recommendation sources from:
+    1. Currently viewed product
+    2. Products viewed >5 seconds
+    3. Top 5 recent cart items
+    4. Search history matches
+
+    For each source, runs KNN → collects similar products → blends & deduplicates.
+    """
+    sources = await get_recommendation_sources(user.id, db, current_product_id)
+
+    if not sources:
+        # Fallback: popular products
         result = await db.execute(
             select(Product)
             .where(Product.in_stock.is_(True))
@@ -65,46 +78,94 @@ async def get_recommendations(
         products = result.scalars().all()
         return {
             "source": "popular",
-            "source_product": None,
-            "recommendations": [
-                {
-                    "id": p.id,
-                    "stock_code": p.stock_code,
-                    "name": p.name,
-                    "price": p.price,
-                    "image_url": p.image_url,
-                    "category": p.category,
-                    "similarity": 0,
-                }
-                for p in products
-            ],
+            "source_products": [],
+            "recommendations": [_product_to_rec(p, 0) for p in products],
         }
 
-    # Use KNN model
-    knn_result = recommend_products(stock_code, top_k=10)
-    if knn_result is None:
-        return {"source": "popular", "source_product": stock_code, "recommendations": []}
+    # ── Run KNN for each source, blend results (ROUND ROBIN DIVERSITY) ──────────
+    source_codes = {s["stock_code"] for s in sources}
+    all_source_candidates = []
 
-    # Enrich with DB product info
+    for src in sources:
+        # Get enough candidates to ensure some non-duplicates
+        knn_result = recommend_products(src["stock_code"], top_k=30)
+        if knn_result is None:
+            continue
+
+        candidates = []
+        for rec in knn_result["recommendations"]:
+            code = rec["stock_code"]
+            # Don't recommend source products themselves
+            if code in source_codes:
+                continue
+
+            candidates.append({
+                "stock_code": code,
+                "score": rec["similarity"] * src["weight"],
+                "raw_similarity": rec["similarity"],
+                "from_source": src["source"],
+                "src_weight": src["weight"]
+            })
+            
+        if candidates:
+            # Sort candidates internally by absolute score
+            candidates.sort(key=lambda x: x["score"], reverse=True)
+            all_source_candidates.append(candidates)
+
+    # Sort the source "queues" by their original weight, so recent/current views pick first
+    all_source_candidates.sort(key=lambda q: q[0]["src_weight"] if q else 0, reverse=True)
+
+    ranked = []
+    seen = set()
+    idx = 0
+    
+    # Interleave 1 from source A, 1 from B, 1 from C...
+    while True:
+        added_in_round = False
+        for queue in all_source_candidates:
+            # Find the next unseen item in this queue
+            local_idx = idx
+            while local_idx < len(queue):
+                item = queue[local_idx]
+                if item["stock_code"] not in seen:
+                    ranked.append(item)
+                    seen.add(item["stock_code"])
+                    added_in_round = True
+                    break # Move to next queue
+                local_idx += 1
+                
+        idx += 1
+        if not added_in_round or len(ranked) >= 40:
+            break
+
+    # Enrich with DB product info — ONLY include products that exist in our DB
     enriched = []
-    for rec in knn_result["recommendations"]:
+    for item in ranked:
+        if len(enriched) >= 20:
+            break
         result = await db.execute(
-            select(Product).where(Product.stock_code == rec["stock_code"])
+            select(Product).where(Product.stock_code == item["stock_code"])
         )
         p = result.scalar_one_or_none()
-        enriched.append({
-            "id": p.id if p else 0,
-            "stock_code": rec["stock_code"],
-            "name": p.name if p else rec["stock_code"],
-            "price": p.price if p else 0,
-            "image_url": p.image_url if p else "",
-            "category": p.category if p else "",
-            "similarity": rec["similarity"],
-        })
+        if p:
+            enriched.append({
+                "id": p.id,
+                "stock_code": p.stock_code,
+                "name": p.name,
+                "price": p.price,
+                "image_url": p.image_url,
+                "category": p.category,
+                "similarity": item["raw_similarity"],
+                "source": item["from_source"],
+            })
+        # Skip products not in DB (KNN knows 4499 but we only have 100)
 
     return {
-        "source": "knn",
-        "source_product": stock_code,
+        "source": "multi_knn",
+        "source_products": [
+            {"stock_code": s["stock_code"], "weight": s["weight"], "from": s["source"]}
+            for s in sources
+        ],
         "recommendations": enriched,
     }
 
@@ -114,7 +175,7 @@ async def get_behavior_profile(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Compute RFM features from behavior → RF predict + K-Means segment."""
+    """Compute RFM features from behavior -> RF predict + K-Means segment."""
     rfm = await compute_rfm_from_behavior(user.id, db)
     features = CustomerFeatures(**rfm)
 
@@ -126,4 +187,17 @@ async def get_behavior_profile(
     return {
         "rfm_features": rfm,
         "prediction": prediction,
+    }
+
+
+def _product_to_rec(p: Product, similarity: float) -> dict:
+    return {
+        "id": p.id,
+        "stock_code": p.stock_code,
+        "name": p.name,
+        "price": p.price,
+        "image_url": p.image_url,
+        "category": p.category,
+        "similarity": similarity,
+        "source": "popular",
     }

@@ -53,7 +53,7 @@ class ModelStore:
         self.configs["product_mappings"] = _load_json(d / "product_mappings.json")
 
         self.is_loaded = True
-        print(f"✅ Loaded {len(self.models)} model artifacts from {d}")
+        print(f"[OK] Loaded {len(self.models)} model artifacts from {d}")
 
     def unload_all(self) -> None:
         self.models.clear()
