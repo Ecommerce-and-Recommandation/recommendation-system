@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import init_db
 from app.routers import prediction, recommendation, segmentation
-from app.routers import auth, products, cart, behavior
+from app.routers import auth, products, cart, behavior, promotions, orders
 from app.services.model_loader import model_store
 
 
@@ -48,7 +48,8 @@ app.include_router(auth.router, prefix="/api", tags=["Auth"])
 app.include_router(products.router, prefix="/api", tags=["Products"])
 app.include_router(cart.router, prefix="/api", tags=["Cart"])
 app.include_router(behavior.router, prefix="/api", tags=["Behavior Tracking"])
-
+app.include_router(promotions.router, prefix="/api", tags=["Promotions"])
+app.include_router(orders.router, prefix="/api", tags=["Orders"])
 # ── Admin / ML APIs ─────────────────────────────────────
 app.include_router(prediction.router, prefix="/api", tags=["Purchase Prediction"])
 app.include_router(recommendation.router, prefix="/api", tags=["Product Recommendation"])

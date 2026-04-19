@@ -28,6 +28,7 @@ class UserResponse(BaseModel):
     email: str
     name: str
     country: str
+    is_admin: bool
 
 
 @router.post("/auth/login", response_model=LoginResponse)
@@ -41,10 +42,10 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {"id": user.id, "email": user.email, "name": user.name, "country": user.country},
+        "user": {"id": user.id, "email": user.email, "name": user.name, "country": user.country, "is_admin": user.is_admin},
     }
 
 
 @router.get("/auth/me", response_model=UserResponse)
 async def me(user: User = Depends(get_current_user)):
-    return {"id": user.id, "email": user.email, "name": user.name, "country": user.country}
+    return {"id": user.id, "email": user.email, "name": user.name, "country": user.country, "is_admin": user.is_admin}

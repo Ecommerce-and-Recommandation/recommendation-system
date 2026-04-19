@@ -2,12 +2,13 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
-from app.db_models import CartItem, Product, User
+from app.db_models import CartItem, Product, User, Order, OrderItem, Promotion, PromotionUsage
 from app.services.auth import get_current_user
 
 router = APIRouter()
@@ -133,3 +134,98 @@ async def remove_from_cart(
     await db.delete(item)
     await db.commit()
     return {"deleted": True}
+
+
+class CheckoutRequest(BaseModel):
+    selected_item_ids: list[int]
+    promotion_id: Optional[int] = None
+
+class CheckoutResponse(BaseModel):
+    order_id: int
+    total_paid: float
+    message: str
+
+@router.post("/cart/checkout", response_model=CheckoutResponse)
+async def checkout(
+    body: CheckoutRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if not body.selected_item_ids:
+        raise HTTPException(status_code=400, detail="No items selected for checkout")
+
+    # Fetch selected cart items
+    result = await db.execute(
+        select(CartItem).where(CartItem.user_id == user.id, CartItem.id.in_(body.selected_item_ids))
+        .options(selectinload(CartItem.product))
+    )
+    items = result.scalars().all()
+    if not items:
+        raise HTTPException(status_code=404, detail="Selected items not found in cart")
+
+    # Calculate subtotal
+    subtotal = sum([item.product.price * item.quantity for item in items])
+    discount = 0.0
+    promo = None
+
+    # Handle Promotion
+    if body.promotion_id:
+        p_res = await db.execute(select(Promotion).where(Promotion.id == body.promotion_id))
+        promo = p_res.scalar_one_or_none()
+        if not promo or not promo.is_active:
+            raise HTTPException(status_code=400, detail="Invalid or inactive promotion")
+        
+        # We assume validity (date, min_amount) was checked beforehand or we do it quickly here
+        if subtotal >= promo.min_order_amount:
+            if promo.discount_type == "PERCENTAGE":
+                discount = subtotal * (promo.discount_value / 100.0)
+            else:
+                discount = promo.discount_value
+            if discount > subtotal: discount = subtotal
+
+    total_amount = round(subtotal - discount, 2)
+
+    # 1. Create Order
+    order = Order(
+        user_id=user.id,
+        total_amount=total_amount,
+        discount_amount=round(discount, 2),
+        status="COMPLETED"
+    )
+    db.add(order)
+    await db.flush() # get order.id
+
+    # 2. Create Order Items
+    for item in items:
+        o_item = OrderItem(
+            order_id=order.id,
+            product_id=item.product_id,
+            quantity=item.quantity,
+            price_at_time=item.product.price
+        )
+        db.add(o_item)
+        
+        # Increase product purchase_count
+        item.product.purchase_count += item.quantity
+
+    # 3. Create Promo Usage
+    if promo and discount > 0:
+        usage = PromotionUsage(
+            user_id=user.id,
+            promotion_id=promo.id,
+            order_id=order.id
+        )
+        db.add(usage)
+        promo.times_used += 1
+
+    # 4. Remove checked out items from Cart
+    for item in items:
+        await db.delete(item)
+
+    await db.commit()
+    
+    return CheckoutResponse(
+        order_id=order.id,
+        total_paid=total_amount,
+        message="Order placed successfully!"
+    )
