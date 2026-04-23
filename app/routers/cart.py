@@ -139,6 +139,8 @@ async def remove_from_cart(
 class CheckoutRequest(BaseModel):
     selected_item_ids: list[int]
     promotion_id: Optional[int] = None
+    shipping_address: str
+    phone: str
 
 class CheckoutResponse(BaseModel):
     order_id: int
@@ -190,7 +192,9 @@ async def checkout(
         user_id=user.id,
         total_amount=total_amount,
         discount_amount=round(discount, 2),
-        status="COMPLETED"
+        status="COMPLETED",
+        shipping_address=body.shipping_address,
+        phone=body.phone
     )
     db.add(order)
     await db.flush() # get order.id
