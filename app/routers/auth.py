@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.db_models import User
+from app.db_models import User, RefreshToken
 from app.services.auth import create_access_token, get_current_user, verify_password
 
 router = APIRouter()
