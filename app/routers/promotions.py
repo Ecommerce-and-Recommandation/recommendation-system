@@ -7,7 +7,7 @@ from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.db_models import User, Promotion, PromotionUsage, Product, BehaviorEvent
+from app.db_models import User, Promotion, PromotionUsage, Product, BehaviorEvent, Order
 from app.services.auth import get_current_user
 
 router = APIRouter()
@@ -115,6 +115,10 @@ async def get_available_promotions(
     
     # Calculate days since user registration
     user_age_days = (datetime.now(timezone.utc) - current_user.created_at).days if getattr(current_user, 'created_at', None) else 31
+    
+    # Get user order count
+    order_count_res = await db.execute(select(func.count(Order.id)).where(Order.user_id == current_user.id, Order.status == "COMPLETED"))
+    user_order_count = order_count_res.scalar_one()
 
     for promo in promos:
         # Check amount
@@ -122,6 +126,8 @@ async def get_available_promotions(
             continue
         # Check target audience
         if promo.target_audience == "NEW_USER" and user_age_days > 30:
+            continue
+        if promo.target_audience == "LOYAL_USER" and user_order_count < 3:
             continue
             
         # Check limits
@@ -172,6 +178,12 @@ async def apply_promotion(
     user_age_days = (datetime.now(timezone.utc) - current_user.created_at).days if getattr(current_user, 'created_at', None) else 31
     if promo.target_audience == "NEW_USER" and user_age_days > 30:
         return PromoApplyResponse(valid=False, message="Mã này chỉ dành cho tài khoản tạo dưới 30 ngày.", discount_amount=0)
+        
+    if promo.target_audience == "LOYAL_USER":
+        order_count_res = await db.execute(select(func.count(Order.id)).where(Order.user_id == current_user.id, Order.status == "COMPLETED"))
+        user_order_count = order_count_res.scalar_one()
+        if user_order_count < 3:
+            return PromoApplyResponse(valid=False, message="Mã này chỉ dành cho khách hàng đã mua từ 3 đơn trở lên.", discount_amount=0)
 
     # Check if user already used this promo
     usage = await db.execute(select(PromotionUsage).where(
@@ -208,13 +220,12 @@ async def get_ai_suggestions(
     AI Insight: Trả về danh sách sản phẩm có Lượt xem cao nhưng Lượt mua thấp.
     Đề xuất Admin hệ thống tạo Voucher giảm giá cho các sản phẩm này.
     """
-    # Simply mapping: High Views (num_customers viewing > X) but low purchase counts.
-    # In db_models, product.num_customers stores number of users interacting.
-    # product.purchase_count stores items bought.
+    # AI Insight: Trả về danh sách sản phẩm có Lượt xem cao nhưng Lượt mua thấp.
+    # Relaxed thresholds: any product with views, prioritizing low conversion rates
     result = await db.execute(
         select(Product)
-        .where(Product.num_customers > 2, Product.purchase_count < 2) # Thresholds for demo
-        .order_by(desc(Product.num_customers))
+        .where(Product.num_customers > 0)
+        .order_by(Product.purchase_count.asc(), desc(Product.num_customers))
         .limit(3)
     )
     products = result.scalars().all()

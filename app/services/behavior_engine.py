@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db_models import BehaviorEvent, CartItem, Product
+from app.db_models import BehaviorEvent, CartItem, Product, Order, OrderItem
 
 
 async def compute_rfm_from_behavior(user_id: int, db: AsyncSession) -> dict:
@@ -199,7 +199,28 @@ async def get_recommendation_sources(
             })
             seen_codes.add(product.stock_code)
 
-    # ── 4. Search history → match products ───────────────
+    # ── 4. Purchased products (order history) ────────────
+    order_result = await db.execute(
+        select(OrderItem.product_id)
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(
+            Order.user_id == user_id,
+            Order.status == "COMPLETED",
+        )
+        .distinct()
+        .limit(10)
+    )
+    for row in order_result.all():
+        product = await db.get(Product, row[0])
+        if product and product.stock_code not in seen_codes:
+            sources.append({
+                "stock_code": product.stock_code,
+                "weight": 0.9,
+                "source": "purchased",
+            })
+            seen_codes.add(product.stock_code)
+
+    # ── 5. Search history → match products ───────────────
     search_result = await db.execute(
         select(BehaviorEvent.metadata_json)
         .where(
