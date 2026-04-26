@@ -199,7 +199,7 @@ async def checkout(
     db.add(order)
     await db.flush() # get order.id
 
-    # 2. Create Order Items
+    # 2. Create Order Items + Stock Control
     for item in items:
         o_item = OrderItem(
             order_id=order.id,
@@ -208,9 +208,11 @@ async def checkout(
             price_at_time=item.product.price
         )
         db.add(o_item)
-        
+
         # Increase product purchase_count
         item.product.purchase_count += item.quantity
+        # Increase unique customer count for promotion engine
+        item.product.num_customers = (item.product.num_customers or 0) + 1
 
     # 3. Create Promo Usage
     if promo and discount > 0:
