@@ -31,6 +31,7 @@ class Product(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     stock_code: Mapped[str] = mapped_column(String(20), unique=True, nullable=False, index=True)
+    parent_sku: Mapped[str] = mapped_column(String(50), nullable=False, index=True, default="")
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
     price: Mapped[float] = mapped_column(Float, nullable=False)

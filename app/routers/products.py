@@ -24,6 +24,7 @@ def get_admin_user(current_user: User = Depends(get_current_user)):
 class ProductOut(BaseModel):
     id: int
     stock_code: str
+    parent_sku: str
     name: str
     description: str
     price: float
@@ -31,6 +32,16 @@ class ProductOut(BaseModel):
     category: str
     in_stock: bool
     purchase_count: int
+
+
+class ProductVariantOut(BaseModel):
+    id: int
+    stock_code: str
+    name: str
+
+
+class ProductDetailOut(ProductOut):
+    variants: list[ProductVariantOut]
 
 
 class ProductListResponse(BaseModel):
@@ -48,19 +59,21 @@ async def list_products(
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(Product).where(Product.in_stock.is_(True))
-    count_q = select(func.count(Product.id)).where(Product.in_stock.is_(True))
-
+    # Subquery to get one representative product ID per parent_sku
+    subq = select(func.min(Product.id).label("id")).where(Product.in_stock.is_(True))
     if category:
-        q = q.where(Product.category == category)
-        count_q = count_q.where(Product.category == category)
+        subq = subq.where(Product.category == category)
     if search:
         pattern = f"%{search}%"
-        q = q.where(Product.name.ilike(pattern) | Product.description.ilike(pattern))
-        count_q = count_q.where(Product.name.ilike(pattern) | Product.description.ilike(pattern))
-
+        subq = subq.where(Product.name.ilike(pattern) | Product.description.ilike(pattern))
+    subq = subq.group_by(Product.parent_sku)
+    
+    # Total count of distinct groups
+    count_q = select(func.count()).select_from(subq.subquery())
     total = (await db.execute(count_q)).scalar() or 0
-    q = q.order_by(Product.purchase_count.desc()).offset((page - 1) * page_size).limit(page_size)
+
+    # Get paginated product rows
+    q = select(Product).where(Product.id.in_(subq)).order_by(Product.purchase_count.desc()).offset((page - 1) * page_size).limit(page_size)
     rows = (await db.execute(q)).scalars().all()
 
     return {
@@ -82,18 +95,30 @@ async def list_categories(db: AsyncSession = Depends(get_db)):
     return [{"name": row[0], "count": row[1]} for row in result.all()]
 
 
-@router.get("/products/{product_id}", response_model=ProductOut)
+@router.get("/products/{product_id}", response_model=ProductDetailOut)
 async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
     product = await db.get(Product, product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
-    return _to_dict(product)
+        
+    # Find variants with the same parent_sku
+    variants_query = select(Product).where(
+        Product.parent_sku == product.parent_sku, 
+        Product.in_stock.is_(True)
+    ).order_by(Product.stock_code)
+    variants_rows = (await db.execute(variants_query)).scalars().all()
+    
+    result = _to_dict(product)
+    # Only add variants if there's more than 1 (meaning it's actually part of a group)
+    result["variants"] = [{"id": v.id, "stock_code": v.stock_code, "name": v.name} for v in variants_rows] if len(variants_rows) > 1 else []
+    return result
 
 
 def _to_dict(p: Product) -> dict:
     return {
         "id": p.id,
         "stock_code": p.stock_code,
+        "parent_sku": p.parent_sku,
         "name": p.name,
         "description": p.description,
         "price": p.price,
