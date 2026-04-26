@@ -247,3 +247,66 @@ async def get_ai_suggestions(
         })
 
     return suggestions
+
+
+# ── Dynamic AI Voucher by Probability ──────────────────
+
+@router.get("/promotions/dynamic-voucher")
+async def get_dynamic_voucher(
+    cart_total: float,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Generate a personalized voucher suggestion based on ML purchase probability.
+
+    Strategy:
+      - prob < 0.3  → No voucher (very unlikely to purchase regardless)
+      - prob 0.3-0.5 → 20% discount (strong nudge needed)
+      - prob 0.5-0.7 → 10% discount (moderate nudge)
+      - prob 0.7-0.9 → 5% discount or freeship (likely buyer, small incentive)
+      - prob > 0.9  → No discount (will buy anyway, maximize profit)
+    """
+    from app.services.behavior_engine import compute_rfm_from_behavior
+    from app.services.predictor import predict_purchase
+    from app.schemas.models import CustomerFeatures
+
+    rfm = await compute_rfm_from_behavior(current_user.id, db)
+    features = CustomerFeatures(**rfm)
+
+    try:
+        prediction = predict_purchase(features)
+    except Exception:
+        return {"voucher": None, "reason": "Could not compute prediction"}
+
+    prob = prediction["probability"]
+    segment_name = prediction.get("segment_name", "Unknown")
+
+    voucher = None
+    if 0.3 <= prob < 0.5:
+        voucher = {
+            "discount_type": "PERCENTAGE",
+            "discount_value": 20,
+            "message": f"🎁 Giảm 20% đặc biệt cho bạn! Đừng bỏ lỡ nhé.",
+            "min_order_amount": max(cart_total * 0.5, 5.0),
+        }
+    elif 0.5 <= prob < 0.7:
+        voucher = {
+            "discount_type": "PERCENTAGE",
+            "discount_value": 10,
+            "message": f"✨ Giảm 10% cho đơn hàng tiếp theo!",
+            "min_order_amount": max(cart_total * 0.7, 5.0),
+        }
+    elif 0.7 <= prob < 0.9:
+        voucher = {
+            "discount_type": "FIXED",
+            "discount_value": round(cart_total * 0.05, 2),
+            "message": f"🚚 Ưu đãi freeship trị giá £{round(cart_total * 0.05, 2)} cho bạn!",
+            "min_order_amount": 0,
+        }
+
+    return {
+        "probability": prob,
+        "segment": segment_name,
+        "voucher": voucher,
+        "reason": "high_intent_no_discount" if prob >= 0.9 else ("low_intent" if prob < 0.3 else "nudge"),
+    }

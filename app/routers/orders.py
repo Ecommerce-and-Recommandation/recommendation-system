@@ -1,9 +1,9 @@
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -92,21 +92,28 @@ async def get_my_orders(
 
 # ── Admin Endpoints ────────────────────────────────────
 
-@router.get("/admin/orders", response_model=List[OrderOut])
+@router.get("/admin/orders")
 async def get_all_orders(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(get_admin_user)
 ):
-    """Get all global orders for admin dashboard."""
+    """Get paginated orders for admin dashboard."""
+    count_q = select(func.count(Order.id))
+    total = (await db.execute(count_q)).scalar() or 0
+
     result = await db.execute(
         select(Order)
         .options(
             selectinload(Order.items).selectinload(OrderItem.product)
         )
         .order_by(desc(Order.created_at))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     )
     orders = result.scalars().all()
-    
+
     out = []
     for order in orders:
         items_mapped = []
@@ -119,7 +126,7 @@ async def get_all_orders(
                 product_name=item.product.name if item.product else "Unknown Product",
                 product_image=item.product.image_url if item.product else ""
             ))
-        
+
         out.append(OrderOut(
             id=order.id,
             user_id=order.user_id,
@@ -129,7 +136,7 @@ async def get_all_orders(
             created_at=order.created_at,
             items=items_mapped
         ))
-    return out
+    return {"orders": out, "total": total, "page": page, "page_size": page_size}
 
 @router.put("/admin/orders/{order_id}/status")
 async def update_order_status(

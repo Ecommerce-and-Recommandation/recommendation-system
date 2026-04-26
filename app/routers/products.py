@@ -1,14 +1,24 @@
-"""Products router – public (no auth required for browsing)."""
+"""Products router – public + admin CRUD."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.db_models import Product
+from app.db_models import Product, User
+from app.services.auth import get_current_user
 
 router = APIRouter()
+
+
+# Admin check dependency
+def get_admin_user(current_user: User = Depends(get_current_user)):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Requires admin privileges")
+    return current_user
 
 
 class ProductOut(BaseModel):
@@ -92,3 +102,119 @@ def _to_dict(p: Product) -> dict:
         "in_stock": p.in_stock,
         "purchase_count": p.purchase_count,
     }
+
+
+# ── Admin CRUD ─────────────────────────────────────────
+
+class ProductCreate(BaseModel):
+    stock_code: str
+    name: str
+    description: str = ""
+    price: float
+    image_url: str = ""
+    category: str = "Other"
+    in_stock: bool = True
+
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    price: Optional[float] = None
+    image_url: Optional[str] = None
+    category: Optional[str] = None
+    in_stock: Optional[bool] = None
+
+
+@router.get("/admin/products", response_model=ProductListResponse)
+async def admin_list_products(
+    category: str | None = None,
+    search: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_admin_user),
+):
+    """Admin product list – includes out-of-stock items."""
+    q = select(Product)
+    count_q = select(func.count(Product.id))
+
+    if category:
+        q = q.where(Product.category == category)
+        count_q = count_q.where(Product.category == category)
+    if search:
+        pattern = f"%{search}%"
+        q = q.where(Product.name.ilike(pattern) | Product.description.ilike(pattern))
+        count_q = count_q.where(Product.name.ilike(pattern) | Product.description.ilike(pattern))
+
+    total = (await db.execute(count_q)).scalar() or 0
+    q = q.order_by(Product.id.desc()).offset((page - 1) * page_size).limit(page_size)
+    rows = (await db.execute(q)).scalars().all()
+
+    return {
+        "products": [_to_dict(p) for p in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@router.post("/admin/products", response_model=ProductOut)
+async def create_product(
+    body: ProductCreate,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_admin_user),
+):
+    """Create a new product."""
+    existing = await db.execute(select(Product).where(Product.stock_code == body.stock_code))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Stock code already exists")
+
+    product = Product(
+        stock_code=body.stock_code,
+        name=body.name,
+        description=body.description,
+        price=body.price,
+        image_url=body.image_url,
+        category=body.category,
+        in_stock=body.in_stock,
+    )
+    db.add(product)
+    await db.commit()
+    await db.refresh(product)
+    return _to_dict(product)
+
+
+@router.put("/admin/products/{product_id}", response_model=ProductOut)
+async def update_product(
+    product_id: int,
+    body: ProductUpdate,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_admin_user),
+):
+    """Update an existing product."""
+    product = await db.get(Product, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    update_data = body.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(product, field, value)
+
+    await db.commit()
+    await db.refresh(product)
+    return _to_dict(product)
+
+
+@router.delete("/admin/products/{product_id}")
+async def delete_product(
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_admin_user),
+):
+    """Delete a product."""
+    product = await db.get(Product, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    await db.delete(product)
+    await db.commit()
+    return {"status": "deleted"}

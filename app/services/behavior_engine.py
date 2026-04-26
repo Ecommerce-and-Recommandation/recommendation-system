@@ -52,6 +52,19 @@ async def compute_rfm_from_behavior(user_id: int, db: AsyncSession) -> dict:
             monetary += product.price * ci.quantity
             total_items += ci.quantity
 
+    # Compute real cancellation rate from orders
+    total_orders_res = await db.execute(
+        select(func.count(Order.id)).where(Order.user_id == user_id)
+    )
+    total_order_count = total_orders_res.scalar_one()
+
+    cancelled_orders_res = await db.execute(
+        select(func.count(Order.id)).where(Order.user_id == user_id, Order.status == "CANCELED")
+    )
+    cancelled_count = cancelled_orders_res.scalar_one()
+
+    cancellation_rate = cancelled_count / max(total_order_count, 1)
+
     # Unique products viewed
     viewed_products = set()
     add_to_cart_count = 0
@@ -86,7 +99,7 @@ async def compute_rfm_from_behavior(user_id: int, db: AsyncSession) -> dict:
         "avg_items_per_order": round(avg_items_per_order, 2),
         "total_unique_products": total_unique_products,
         "avg_days_between_orders": round(avg_days_between, 1),
-        "cancellation_rate": 0.0,
+        "cancellation_rate": round(cancellation_rate, 3),
         "days_since_first_purchase": days_since_first,
         "is_weekend_shopper": round(is_weekend_shopper, 3),
         "favorite_hour": favorite_hour,
