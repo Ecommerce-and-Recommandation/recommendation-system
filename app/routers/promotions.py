@@ -219,19 +219,29 @@ async def get_ai_suggestions(
     """
     AI Insight: Trả về danh sách sản phẩm có Lượt xem cao nhưng Lượt mua thấp.
     Đề xuất Admin hệ thống tạo Voucher giảm giá cho các sản phẩm này.
+    Tự động loại bỏ sản phẩm đã có voucher active.
     """
-    # AI Insight: Trả về danh sách sản phẩm có Lượt xem cao nhưng Lượt mua thấp.
-    # Relaxed thresholds: any product with views, prioritizing low conversion rates
+    # Lấy tất cả promo codes đang active để loại sản phẩm đã có voucher
+    active_promos_result = await db.execute(
+        select(Promotion.code).where(Promotion.is_active == True)
+    )
+    active_codes = {row[0] for row in active_promos_result.all()}
+
     result = await db.execute(
         select(Product)
         .where(Product.num_customers > 0)
         .order_by(Product.purchase_count.asc(), desc(Product.num_customers))
-        .limit(3)
+        .limit(10)  # Fetch more to account for filtered-out products
     )
     products = result.scalars().all()
     
     suggestions = []
     for p in products:
+        promo_code = f"SALE_{p.stock_code}"
+        # Skip products that already have an active promotion
+        if promo_code in active_codes:
+            continue
+
         suggestions.append({
             "product_id": p.id,
             "product_name": p.name,
@@ -239,12 +249,15 @@ async def get_ai_suggestions(
             "reason": f"Sản phẩm có {p.num_customers} khách hàng quan tâm nhưng lượng mua rất thấp ({p.purchase_count}).",
             "suggested_action": "TẠO VOUCHER",
             "suggested_promo": {
-                "code": f"SALE_{p.stock_code}",
+                "code": promo_code,
                 "discount_type": "PERCENTAGE",
                 "discount_value": 15,
                 "message": f"Giảm 15% để kích thích bán hàng."
             }
         })
+
+        if len(suggestions) >= 3:
+            break
 
     return suggestions
 
@@ -286,21 +299,21 @@ async def get_dynamic_voucher(
         voucher = {
             "discount_type": "PERCENTAGE",
             "discount_value": 20,
-            "message": f"🎁 Giảm 20% đặc biệt cho bạn! Đừng bỏ lỡ nhé.",
+            "message": f"Giảm 20% đặc biệt cho bạn! Đừng bỏ lỡ nhé.",
             "min_order_amount": max(cart_total * 0.5, 5.0),
         }
     elif 0.5 <= prob < 0.7:
         voucher = {
             "discount_type": "PERCENTAGE",
             "discount_value": 10,
-            "message": f"✨ Giảm 10% cho đơn hàng tiếp theo!",
+            "message": f"Giảm 10% cho đơn hàng tiếp theo!",
             "min_order_amount": max(cart_total * 0.7, 5.0),
         }
     elif 0.7 <= prob < 0.9:
         voucher = {
             "discount_type": "FIXED",
             "discount_value": round(cart_total * 0.05, 2),
-            "message": f"🚚 Ưu đãi freeship trị giá £{round(cart_total * 0.05, 2)} cho bạn!",
+            "message": f"Ưu đãi freeship trị giá £{round(cart_total * 0.05, 2)} cho bạn!",
             "min_order_amount": 0,
         }
 
